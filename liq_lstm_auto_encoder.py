@@ -177,19 +177,12 @@ class StressStrainRNN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super(StressStrainRNN, self).__init__()
         self.hidden_size = hidden_size
-        # RNN Layer
         self.rnn = nn.RNN(input_size, hidden_size, batch_first=True)
-        # Fully connected layer
         self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
-        # Initialize hidden state with zeros
         h0 = torch.zeros(1, x.size(0), self.hidden_size).to(x.device)
-        
-        # Forward propagate RNN
         out, _ = self.rnn(x, h0)
-        
-        # Decode the hidden state of the last time step
         out = self.fc(out[:, -1, :])
         return out
 
