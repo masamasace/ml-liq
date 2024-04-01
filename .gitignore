@@ -1,0 +1,4 @@
+/result/*
+main.py
+/__pycache__/*
+*.out
