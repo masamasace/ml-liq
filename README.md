@@ -1,6 +1,36 @@
 # 目的
 - 単一の液状化試験結果から任意の応力経路における応力ひずみ関係を書く
 
+# 2024/07/15の勉強メモ
+
+- LSTMとSeq2Seqのコードを完成させる
+- 現状のコードで`RNN`の部分は以下の通り
+```python
+class StressStrainRNN(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(StressStrainRNN, self).__init__()
+        self.hidden_size = hidden_size
+        self.rnn = nn.RNN(input_size, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        h0 = torch.zeros(1, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.rnn(x, h0)
+        out = self.fc(out[:, -1, :])
+        return out
+```
+- 上記のコードの要点
+    - class作成時に、nn.Moduleを継承している
+    - `super(StressStrainRNN, self).__init__()`の部分では、親クラスの`__init__`メソッドを呼び出している
+        - 親クラスである`nn.Module`のソースコードは[ここ](https://github.com/pytorch/pytorch/blob/1d983bbb289f47f2544d0d1eece47a200d2038c4/torch/nn/modules/module.py#L398)
+    - `self.hidden_size`は親クラスには存在しないが、自分で定義している。それ以外も同様
+    - `self.fc`は全結合層を表している
+    - `forward`メソッドは、入力`x`を受け取り、出力を返すメソッド
+        - `h0`は隠れ状態の初期値テンソル
+        - `out, _`はRNNの出力と隠れ状態のタプル
+        - `out[:, -1, :]`は出力の最後の要素を取得している
+- 
+
 # 2024/04/01の勉強メモ
 - CNNはひとまず完成→次はRNN，LSTM，Seq2Seqのコードの完成を目指す
 - nn.RNNの内容の理解
