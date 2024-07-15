@@ -9,6 +9,7 @@ import gc
 import numpy as np
 import matplotlib.pyplot as plt
 import datetime
+import random
 
 plt.rcParams["font.family"] = "Arial"
 plt.rcParams["mathtext.fontset"] = "dejavuserif" 
@@ -23,8 +24,22 @@ def setup_figure(num_row=1, num_col=1, width=5, height=4, left=0.125, right=0.9,
     fig.subplots_adjust(left=left, right=right, hspace=hspace, wspace=wspace)
     return (fig, axes)
 
+def torch_fix_seed(seed=0):
+    # Python random
+    random.seed(seed)
+    # Numpy
+    np.random.seed(seed)
+    # Pytorch
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms = True
+
+
 class LiqDataFormatter:
-    def __init__(self, data_path, start_row_index=25) -> None:
+    def __init__(self, data_path, start_row_index=25, seed=0) -> None:
+        
+        torch_fix_seed(seed)
         
         self.data_path = Path(data_path).resolve()
         self.result_path =self.data_path.parent / "result"
@@ -247,13 +262,16 @@ class TrainLiqData:
         
         if model_type == "RNN":
             
-            self.input_dim = 5
-            self.output_dim = 2
+            temp_input_col = ["p_pa", "q_pa", "q_inc", "ea_nodim", "CDE"]
+            temp_output_col = ["p_inc", "ea_inc"]
+            
+            self.input_dim = len(temp_input_col)
+            self.output_dim = len(temp_output_col)
             self.hidden_dim = 128
             self.num_layers = 2
             self.learning_rate = 0.005
             self.num_epochs = 100
-            self.seq_length = 3
+            self.seq_length = 1
             
             self.model = StressStrainRNN(self.input_dim, self.hidden_dim, self.output_dim).to(self.device)
             optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
@@ -267,6 +285,7 @@ class TrainLiqData:
                 self.X_train = torch.tensor(temp_X_train, device=self.device, dtype=torch.float32)
                 y_train = torch.tensor(self.formatted_data_norm.iloc[:, 5:].values[self.seq_length:], device=self.device, dtype=torch.float32)
 
+            print(self.X_train.shape, y_train.shape)
 
         elif model_type == "Seq2Seq":            
             encoder = Encoder(self.input_dim, self.hidden_dim, self.num_layers).to(self.device)
@@ -359,8 +378,8 @@ class TrainLiqData:
         temp_result = np.zeros((0, 5))
         
         while temp_cycle < self.end_cycle:
-            temp_input = np.array([temp_p, temp_q, temp_q_inc, temp_ea, temp_CDE]).reshape(-1, 1, 5)
-
+            temp_input = np.array([temp_p, temp_q, temp_q_inc, temp_ea, temp_CDE]).T.reshape(-1, self.seq_length, 5)
+            
             temp_input = temp_input / self.formatted_data_scale.values[:, :5]
             
             if self.model_type in ["LSTM", "Seq2Seq"]:
@@ -381,8 +400,7 @@ class TrainLiqData:
             output = output.squeeze(0).squeeze(0)
             output = output.cpu().detach().numpy()
             
-            output = output[-1] * self.formatted_data_scale.values.flatten()[5:]
-            
+            output = output * self.formatted_data_scale.values.flatten()[5:]
             
             if self.seq_length > 1:
                 temp_q_inc[:-1] = temp_q_inc[1:]
@@ -400,17 +418,17 @@ class TrainLiqData:
             
             temp_CDE[-1]+= (temp_q[-1] - temp_q_inc[-1] / 2)  * output[1] * 3 / 4
                         
-            temp_result = np.vstack((temp_result, np.array([temp_q[-1], temp_p[-1], temp_ea[-1], temp_CDE[-1], temp_cycle])))
+            temp_result = np.vstack((temp_result, np.array([temp_p[-1], temp_q[-1], temp_ea[-1], temp_CDE[-1], temp_cycle])))
             
             if temp_load_forward and temp_q[-1] >= self.q_amp:
                 temp_load_forward = False
                 temp_cycle += 0.5
-                print(temp_q[-1], temp_p[-1], temp_ea[-1], temp_CDE[-1], temp_cycle)
+                # print(temp_p[-1], temp_q[-1], temp_ea[-1], temp_CDE[-1], temp_cycle)
                 
             elif not temp_load_forward and temp_q[-1] <= -self.q_amp:
                 temp_load_forward = True
                 temp_cycle += 0.5
-                print(temp_q[-1], temp_p[-1], temp_ea[-1], temp_CDE[-1], temp_cycle)
+                # print(temp_p[-1], temp_q[-1], temp_ea[-1], temp_CDE[-1], temp_cycle)
                 
         
         
@@ -420,22 +438,27 @@ class TrainLiqData:
             fig, axes = setup_figure(num_row=5, num_col=1, height=12)
             
             temp_x_result = np.linspace(0, 1, len(temp_result))
-            temp_x_original = np.linspace(0, 1, len(self.formatted_data_raw))
+            temp_x_original = np.linspace(0, 1, len(self.formatted_data_raw.iloc[self.seq_length:]))
             
-            axes[0, 0].plot(temp_result[:, 1], temp_result[:, 0], color="k", linewidth=1, alpha=0.5)
-            axes[0 ,0].plot(self.formatted_data_raw["p_pa"], self.formatted_data_raw["q_pa"], color="r", linewidth=1, alpha=0.5)
+            # なぜか分からないが、self.formatted_data_rawの最初のself.seq_length行分がtemp_resultのself.seq_length行の内容に入れ替わっている。
+            print(temp_result)
+            print(self.formatted_data_raw)
+            
+            
+            axes[0, 0].plot(temp_result[:, 0], temp_result[:, 1], color="k", linewidth=1, alpha=0.5)
+            axes[0 ,0].plot(self.formatted_data_raw["p_pa"].iloc[self.seq_length:], self.formatted_data_raw["q_pa"].iloc[self.seq_length:], color="r", linewidth=1, alpha=0.5)
             axes[0 ,0].set_xlabel("p'")
-            axes[1, 0].plot(temp_result[:, 2], temp_result[:, 0], color="k", linewidth=1)
-            axes[1 ,0].plot(self.formatted_data_raw["ea_nodim"], self.formatted_data_raw["q_pa"], color="r", linewidth=1)
+            axes[1, 0].plot(temp_result[:, 2], temp_result[:, 1], color="k", linewidth=1)
+            axes[1 ,0].plot(self.formatted_data_raw["ea_nodim"].iloc[self.seq_length:], self.formatted_data_raw["q_pa"].iloc[self.seq_length:], color="r", linewidth=1)
             axes[1 ,0].set_xlabel("e(a)")
-            axes[2, 0].plot(temp_x_result, temp_result[:, 1], color="k", linewidth=1)
-            axes[2, 0].plot(temp_x_original, self.formatted_data_raw["p_pa"], color="r", linewidth=1)
+            axes[2, 0].plot(temp_x_result, temp_result[:, 0], color="k", linewidth=1)
+            axes[2, 0].plot(temp_x_original, self.formatted_data_raw["p_pa"].iloc[self.seq_length:], color="r", linewidth=1)
             axes[2 ,0].set_ylabel("p")
             axes[3, 0].plot(temp_x_result, temp_result[:, 2], color="k", linewidth=1)
-            axes[3, 0].plot(temp_x_original, self.formatted_data_raw["ea_nodim"], color="r", linewidth=1)
+            axes[3, 0].plot(temp_x_original, self.formatted_data_raw["ea_nodim"].iloc[self.seq_length:], color="r", linewidth=1)
             axes[3 ,0].set_ylabel("e(a)")
             axes[4, 0].plot(temp_x_result, temp_result[:, 3], color="k", linewidth=1)
-            axes[4, 0].plot(temp_x_original, self.formatted_data_raw["CDE"], color="r", linewidth=1)
+            axes[4, 0].plot(temp_x_original, self.formatted_data_raw["CDE"].iloc[self.seq_length:], color="r", linewidth=1)
             axes[4 ,0].set_ylabel("CDE")
             
             
