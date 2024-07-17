@@ -374,28 +374,21 @@ class TrainLiqData:
         if model_type == "RNN":
             
             self.model = StressStrainRNN(self.input_dim, self.hidden_dim, self.output_dim).to(self.device)
-            optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-            criterion = nn.MSELoss()
             
             # make training data
-            temp_X_train = np.zeros((0, self.seq_length, self.input_dim))
-            temp_y_train = np.zeros((0, self.output_dim))
+            temp_X = np.zeros((0, self.seq_length, self.input_dim))
+            temp_y = np.zeros((0, self.output_dim))
             
             for i in range(len(self.train_data_stem)):
                 temp_each_data = self.formatted_data_norm[self.formatted_data_norm["file_name"] == self.train_data_stem[i]]
                 
-                temp_X_train = np.vstack((temp_X_train, np.array([temp_each_data[self.input_col_name].values[j:j+self.seq_length, :] for j in range(len(temp_each_data.iloc[:, :5].values) - self.seq_length)])))
-                temp_y_train = np.vstack((temp_y_train, temp_each_data[self.output_col_name].values[self.seq_length:]))
+                temp_X = np.vstack((temp_X, np.array([temp_each_data[self.input_col_name].values[j:j+self.seq_length, :] for j in range(len(temp_each_data.iloc[:, :5].values) - self.seq_length)])))
+                temp_y = np.vstack((temp_y, temp_each_data[self.output_col_name].values[self.seq_length:]))
                                             
-            self.X_train = torch.tensor(temp_X_train, device=self.device, dtype=torch.float32)
-            y_train = torch.tensor(temp_y_train, device=self.device, dtype=torch.float32)
-            
         
         elif model_type == "CNN":
             
             self.model = StressStrainCNN(self.seq_length).to(self.device)
-            optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
-            criterion = nn.MSELoss()
             
             # make training data
             temp_X = np.zeros((0, self.input_dim, self.seq_length))
@@ -412,19 +405,23 @@ class TrainLiqData:
                     temp_X = np.vstack((temp_X, np.array([temp_each_data[self.input_col_name].values[j:j+self.seq_length, :] for j in range(len(temp_each_data.iloc[:, :5].values) - self.seq_length)])))
                     temp_y = np.vstack((temp_y, temp_each_data[self.output_col_name].values[self.seq_length:]))
             
-            train_size = int(len(temp_X) * self.train_split_ratio)
-            val_size = len(temp_X) - train_size
-            
-            temp_train_X, temp_val_X = random_split(temp_X, [train_size, val_size])
-            temp_train_y, temp_val_y = random_split(temp_y, [train_size, val_size])
-            
-            X_train = torch.tensor(temp_train_X, device=self.device, dtype=torch.float32)
-            X_val = torch.tensor(temp_val_X, device=self.device, dtype=torch.float32)
-            y_train = torch.tensor(temp_train_y, device=self.device, dtype=torch.float32)
-            y_val = torch.tensor(temp_val_y, device=self.device, dtype=torch.float32)
+        train_size = int(len(temp_X) * self.train_split_ratio)
+        val_size = len(temp_X) - train_size
+        
+        temp_train_X, temp_val_X = random_split(temp_X, [train_size, val_size])
+        temp_train_y, temp_val_y = random_split(temp_y, [train_size, val_size])
+        
+        X_train = torch.tensor(temp_train_X, device=self.device, dtype=torch.float32)
+        X_val = torch.tensor(temp_val_X, device=self.device, dtype=torch.float32)
+        y_train = torch.tensor(temp_train_y, device=self.device, dtype=torch.float32)
+        y_val = torch.tensor(temp_val_y, device=self.device, dtype=torch.float32)
             
         print("X_train shape", X_train.shape, "y_train shape", y_train.shape)
         print("X_val shape", X_val.shape, "y_val shape", y_val.shape)
+        
+        # set optimizer and criterion
+        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        criterion = nn.MSELoss()
         
         # create dataloader
         self.batch_size = len(X_train) // self.batch_div
