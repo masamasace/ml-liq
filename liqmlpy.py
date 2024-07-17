@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import datetime
 import random
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, random_split
 
 plt.rcParams["font.family"] = "Arial"
 plt.rcParams["mathtext.fontset"] = "dejavuserif" 
@@ -299,6 +299,26 @@ class StressStrainRNN(nn.Module):
         out = self.fc(out[:, -1, :])
         return out
 
+# define StressStrainCNN
+class StressStrainCNN(nn.Module):
+    def __init__(self, seq_length):
+        super(StressStrainCNN, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels=5, out_channels=256, kernel_size=1, padding=1)
+        self.conv2 = nn.Conv1d(in_channels=256, out_channels=128, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv1d(in_channels=128, out_channels=64, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool1d(kernel_size=3, stride=1, padding=1)
+        self.fc1 = nn.Linear(64 * (seq_length + 2), 64) 
+        self.fc2 = nn.Linear(64, 2) 
+
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = self.pool(F.relu(self.conv3(x)))
+        x = torch.flatten(x, 1) 
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
 
 # define train class
 class TrainLiqData:
@@ -306,9 +326,10 @@ class TrainLiqData:
                  input_col_name = ["p_pa", "q_pa", "q_inc", "ea_nodim", "CSW"],
                  output_col_name = ["p_inc", "ea_inc"],
                  train_data_stem = ["T50-0-1", "T50-0-3", "T50-0-4"],
-                 batch_size=64, num_iterations=40000,
+                 train_split_ratio = 0.8,
+                 batch_div=8, num_epoch=100,
                  hidden_dim=16, num_layers=2, learning_rate=0.001,
-                 seq_length=4, seed=0) -> None:
+                 seq_length=1, seed=0) -> None:
         
         # make instance variables
         self.formatted_data_raw = formatted_data.liq_data
@@ -323,8 +344,9 @@ class TrainLiqData:
         self.output_col_name = output_col_name
         self.train_data_stem = train_data_stem
         
-        self.batch_size = batch_size
-        self.num_iterations = num_iterations
+        self.train_split_ratio = train_split_ratio
+        self.batch_div = batch_div
+        self.num_epoch = num_epoch
         
         self.export_figures_counter = 0
         
@@ -356,51 +378,101 @@ class TrainLiqData:
             criterion = nn.MSELoss()
             
             # make training data
-            if self.seq_length == 1:
-                self.X_train = torch.tensor(self.formatted_data_norm[self.input_col_name].values.reshape(-1, 1, 5), device=self.device, dtype=torch.float32)
-                y_train = torch.tensor(self.formatted_data_norm[self.output_col_name].values, device=self.device, dtype=torch.float32)
+            temp_X_train = np.zeros((0, self.seq_length, self.input_dim))
+            temp_y_train = np.zeros((0, self.output_dim))
             
-            else:
-                temp_X_train = np.zeros((0, self.seq_length, self.input_dim))
-                temp_y_train = np.zeros((0, self.output_dim))
+            for i in range(len(self.train_data_stem)):
+                temp_each_data = self.formatted_data_norm[self.formatted_data_norm["file_name"] == self.train_data_stem[i]]
                 
-                for i in range(len(self.train_data_stem)):
-                    temp_each_data = self.formatted_data_norm[self.formatted_data_norm["file_name"] == self.train_data_stem[i]]
-                    
-                    temp_X_train = np.vstack((temp_X_train, np.array([temp_each_data[self.input_col_name].values[j:j+self.seq_length, :] for j in range(len(temp_each_data.iloc[:, :5].values) - self.seq_length)])))
-                    temp_y_train = np.vstack((temp_y_train, temp_each_data[self.output_col_name].values[self.seq_length:]))
-                                             
-                self.X_train = torch.tensor(temp_X_train, device=self.device, dtype=torch.float32)
-                y_train = torch.tensor(temp_y_train, device=self.device, dtype=torch.float32)
+                temp_X_train = np.vstack((temp_X_train, np.array([temp_each_data[self.input_col_name].values[j:j+self.seq_length, :] for j in range(len(temp_each_data.iloc[:, :5].values) - self.seq_length)])))
+                temp_y_train = np.vstack((temp_y_train, temp_each_data[self.output_col_name].values[self.seq_length:]))
+                                            
+            self.X_train = torch.tensor(temp_X_train, device=self.device, dtype=torch.float32)
+            y_train = torch.tensor(temp_y_train, device=self.device, dtype=torch.float32)
             
-            print("X_train shape", self.X_train.shape, "y_train shape", y_train.shape)
         
-        self.num_epochs = self.num_iterations // (len(self.X_train) // self.batch_size)
-        train_loader = create_dataloader(self.X_train, y_train, self.batch_size)
+        elif model_type == "CNN":
+            
+            self.model = StressStrainCNN(self.seq_length).to(self.device)
+            optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
+            criterion = nn.MSELoss()
+            
+            # make training data
+            temp_X = np.zeros((0, self.input_dim, self.seq_length))
+            temp_y = np.zeros((0, self.output_dim))
+            
+            for i in range(len(self.train_data_stem)):
+                temp_each_data = self.formatted_data_norm[self.formatted_data_norm["file_name"] == self.train_data_stem[i]]
+                
+                if self.seq_length == 1:
+                    temp_X = np.vstack((temp_X, temp_each_data[self.input_col_name].values.reshape(-1, self.input_dim, 1)))
+                    temp_y = np.vstack((temp_y, temp_each_data[self.output_col_name].values))
+                
+                else:
+                    temp_X = np.vstack((temp_X, np.array([temp_each_data[self.input_col_name].values[j:j+self.seq_length, :] for j in range(len(temp_each_data.iloc[:, :5].values) - self.seq_length)])))
+                    temp_y = np.vstack((temp_y, temp_each_data[self.output_col_name].values[self.seq_length:]))
+            
+            train_size = int(len(temp_X) * self.train_split_ratio)
+            val_size = len(temp_X) - train_size
+            
+            temp_train_X, temp_val_X = random_split(temp_X, [train_size, val_size])
+            temp_train_y, temp_val_y = random_split(temp_y, [train_size, val_size])
+            
+            X_train = torch.tensor(temp_train_X, device=self.device, dtype=torch.float32)
+            X_val = torch.tensor(temp_val_X, device=self.device, dtype=torch.float32)
+            y_train = torch.tensor(temp_train_y, device=self.device, dtype=torch.float32)
+            y_val = torch.tensor(temp_val_y, device=self.device, dtype=torch.float32)
+            
+        print("X_train shape", X_train.shape, "y_train shape", y_train.shape)
+        print("X_val shape", X_val.shape, "y_val shape", y_val.shape)
         
-        self.model.train()
+        # create dataloader
+        self.batch_size = len(X_train) // self.batch_div
+        self.num_iterations = self.num_epoch * len(X_train)
         
-        # train model
-        for epoch in range(self.num_epochs):
+        print("batch_size", self.batch_size, "num_iterations", self.num_iterations, "num_epochs", self.num_epoch)
+        
+        train_loader = create_dataloader(X_train, y_train, self.batch_size)
+        
+        # start training
+        
+        epoch_result = np.zeros((0, 3))
+        
+        for epoch in range(self.num_epoch):
+            
+            # train model
+            self.model.train()
+            
             for i, (batch_X, batch_y) in enumerate(train_loader):
                 optimizer.zero_grad()
                 output = self.model(batch_X)
                 loss = criterion(output, batch_y)
                 loss.backward()
                 optimizer.step()
+            
+            # evaluate model
+            self.model.eval()
+            val_output = self.model(X_val)
+            val_loss = criterion(val_output, y_val)
+            
+            print(f'Epoch [{epoch+1}/{self.num_epoch}], Loss: {loss.item():.9f}, Val Loss: {val_loss.item():.9f}')
+            epoch_result = np.vstack((epoch_result, np.array([epoch+1, loss.item(), val_loss.item()])))
                         
-            print(f'Epoch [{epoch+1}/{self.num_epochs}], Loss: {loss.item():.9f}')
-        
         # save model
         self.completed_time = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         model_path = self.result_path / (self.completed_time + "_" + self.model_type + "_model.pth")
         torch.save(self.model, model_path)
+        
+        # save epoch_result
+        epoch_result_path = self.result_path / (self.completed_time + "_" + self.model_type + "_epoch_result.csv")
+        pd.DataFrame(epoch_result, columns=["epoch", "train_loss", "val_loss"]).to_csv(epoch_result_path, index=False)
     
-    def predict(self, inc_control = "q", inc_step = 1, reverse_control = "q", reverse_thres = 26, 
-                end_cycle = 50, stress_unit="kPa", strain_unit="percent", is_exporting = True, ylim=[-25, 25], target_data_stem="T50-0-2"):
+    
+    # method to predict
+    def predict(self, inc_control="q", inc_step=1, reverse_control="q", reverse_thres=26, 
+                end_cycle=100, end_p=-10, end_ea=10, stress_unit="kPa", strain_unit="percent", is_exporting = True, ylim=[-25, 25], target_data_stem="T50-0-2"):
         
         self.model.eval()
-        
         
         # check control parameters
         if inc_control not in ["q", "ea"] or reverse_control not in ["q", "ea"]:
@@ -423,12 +495,14 @@ class TrainLiqData:
             if reverse_control == "q":
                 reverse_thres = reverse_thres * 1000
             ylim = [i * 1000 for i in ylim]
+            end_p = end_p * 1000
         
         if strain_unit == "percent":
             if inc_control == "ea":
                 inc_step = inc_step / 100
             if reverse_control == "ea":
                 reverse_thres = reverse_thres / 100
+            end_ea = end_ea / 100
         
         self.inc_control = inc_control
         self.inc_step = inc_step
@@ -438,11 +512,13 @@ class TrainLiqData:
         self.ylim = ylim
         self.is_exporting = is_exporting
         self.target_data_stem = target_data_stem
+        self.end_p = end_p
+        self.end_ea = end_ea
         
         temp_cycle = 0
         temp_load_forward = True
         
-        if self.model_type == "RNN":
+        if self.model_type in ["RNN", "CNN"]:
             
             temp_input_raw = np.zeros((1, self.seq_length, self.input_dim))
             temp_output_raw = np.zeros((1, self.output_dim))
@@ -452,10 +528,16 @@ class TrainLiqData:
         
         temp_result = np.zeros((0, 5))
         
-        while temp_cycle < self.end_cycle:
+        temp_p_index = self.input_col_name.index("p_pa")
+        temp_ea_index = self.input_col_name.index("ea_nodim")
+        
+        while temp_cycle < self.end_cycle and temp_input_raw[0, -1, temp_p_index] > self.end_p and np.abs(temp_input_raw[0, -1, temp_ea_index]) < self.end_ea:
             
             temp_input_norm = temp_input_raw / self.formatted_data_scale[self.input_col_name].values[:, :5]
             temp_data = torch.tensor(temp_input_norm, device=self.device, dtype=torch.float32)
+            
+            if self.model_type == "CNN":
+                temp_data = temp_data.permute(0, 2, 1)
             
             with torch.no_grad():
                 output_norm = self.model(temp_data)
