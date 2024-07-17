@@ -10,6 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import datetime
 import random
+from torch.utils.data import DataLoader, TensorDataset
 
 plt.rcParams["font.family"] = "Arial"
 plt.rcParams["mathtext.fontset"] = "dejavuserif" 
@@ -35,12 +36,14 @@ def torch_fix_seed(seed=0):
     torch.backends.cudnn.deterministic = True
     torch.use_deterministic_algorithms = True
 
+def create_dataloader(X, y, batch_size):
+    dataset = TensorDataset(X, y)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    return dataloader
 
 class LiqDataFormatter:
-    def __init__(self, data_path, start_row_index=[25], seed=0,
+    def __init__(self, data_path, start_row_index=[25],
                  file_name_col_name=["file_name"],
-                 input_col_name=["p_pa", "q_pa", "q_inc", "ea_nodim", "CSW"],
-                 output_col_name=["p_inc", "ea_inc"],
                  stress_col_name=["p_pa", "q_pa", "q_inc", "p_inc"],
                  strain_col_name=["ea_nodim", "ea_inc"],
                  energy_col_name=["CSW"],
@@ -49,8 +52,6 @@ class LiqDataFormatter:
         """
         CSW: Cumulative Shear Work
         """
-        # fix seed
-        torch_fix_seed(seed)
         
         # check data_path and start_row_index
         self.data_path = data_path
@@ -65,10 +66,6 @@ class LiqDataFormatter:
         if len(self.data_path) != len(start_row_index):
             raise ValueError("data_path and start_row_index must be same length")
         
-        # check set of input_col_name and output_col_name is equal to the sum of stress_col_name, strain_col_name, and energy_col_name
-        if set(input_col_name + output_col_name) != set(stress_col_name + strain_col_name + energy_col_name):
-            raise ValueError("input_col_name and output_col_name must be same as the sum of stress_col_name, strain_col_name, and energy_col_name")
-        
         # print number of data_path
         print(f"Number of data: {len(self.data_path)}")
         
@@ -76,14 +73,17 @@ class LiqDataFormatter:
         self.result_path = Path(__file__).resolve().parent / "result"
         self.result_path.mkdir(parents=True, exist_ok=True)
         
+        # create temp folder
+        self.temp_path = Path(__file__).resolve().parent / "tmp"
+        self.temp_path.mkdir(parents=True, exist_ok=True)
+        
         # make instance variables
         self.file_name_col_name = file_name_col_name
-        self.input_col_name = input_col_name
-        self.output_col_name = output_col_name
-        self.used_col_name = self.file_name_col_name + self.input_col_name + self.output_col_name
         self.stress_col_name = stress_col_name
         self.strain_col_name = strain_col_name
         self.energy_col_name = energy_col_name
+        self.param_col_name = self.stress_col_name + self.strain_col_name + self.energy_col_name
+        self.used_col_name = self.file_name_col_name + self.stress_col_name + self.strain_col_name + self.energy_col_name
         self.ea_thres = ea_thres
         
         # load_data 
@@ -194,7 +194,7 @@ class LiqDataFormatter:
         return liq_data_norm
 
 
-    def export_figures(self, ylim=[], unit="kPa"):
+    def export_stress_strain_figures(self, ylim=[], unit="kPa"):
         
         # check colname 
         if set(pd.unique(self.liq_data_norm["file_name"])) != set(self.data_path_stem):
@@ -241,7 +241,48 @@ class LiqDataFormatter:
             
             plt.clf()
             plt.close()
-            gc.collect()        
+            gc.collect()   
+    
+    def export_histogram(self):
+        
+        temp_num_param = len(self.param_col_name)
+        
+        fig, axes = setup_figure(num_row=1, num_col=temp_num_param, width=5 * temp_num_param, height=4)
+        
+        for i in range(temp_num_param):
+            
+            # liq_data_each["file_name"]で各データを区別。積み上げヒストグラム(barstacked)として表示
+
+            
+            temp_hist_data = []
+            
+            for j in range(len(pd.unique(self.liq_data["file_name"]))):
+                
+                temp_liq_data = self.liq_data[self.liq_data["file_name"] == pd.unique(self.liq_data["file_name"])[j]]
+                temp_hist_data.append(temp_liq_data[self.param_col_name[i]].values)
+            
+            axes[0, i].hist(temp_hist_data, histtype="barstacked", bins=20, label=pd.unique(self.liq_data["file_name"]))
+            
+            axes[0, i].set_xlabel(self.param_col_name[i])
+            
+            axes[0, i].spines["top"].set_linewidth(0.5)
+            axes[0, i].spines["bottom"].set_linewidth(0.5)
+            axes[0, i].spines["right"].set_linewidth(0.5)
+            axes[0, i].spines["left"].set_linewidth(0.5)
+            axes[0, i].xaxis.set_tick_params(width=0.5)
+            axes[0, i].yaxis.set_tick_params(width=0.5)
+            axes[0, i].grid(True, which="both", linestyle="--", linewidth=0.25)
+
+            if i == 0:
+                axes[0, i].legend()
+            
+        fig_name = self.result_path / "histogram.png"
+        fig.savefig(fig_name, format="jpg", dpi=600, pad_inches=0.05, bbox_inches="tight")
+        print("Exported Histogram!")
+        
+        plt.clf()
+        plt.close()
+        gc.collect()
 
 
 # define RNN model
@@ -264,20 +305,28 @@ class TrainLiqData:
     def __init__(self, formatted_data, model_type = "RNN", device_type = "mps",
                  input_col_name = ["p_pa", "q_pa", "q_inc", "ea_nodim", "CSW"],
                  output_col_name = ["p_inc", "ea_inc"],
-                 train_data_stem = ["T50-0-1", "T50-0-3", "T50-0-4"]
-                 ) -> None:
+                 train_data_stem = ["T50-0-1", "T50-0-3", "T50-0-4"],
+                 batch_size=64, num_iterations=40000,
+                 hidden_dim=16, num_layers=2, learning_rate=0.001,
+                 seq_length=4, seed=0) -> None:
         
         # make instance variables
         self.formatted_data_raw = formatted_data.liq_data
         self.formatted_data_norm = formatted_data.liq_data_norm
         self.formatted_data_scale = formatted_data.liq_data_scale
         self.result_path = formatted_data.result_path
+        torch_fix_seed(seed)
         
         self.model_type = model_type
         
         self.input_col_name = input_col_name
         self.output_col_name = output_col_name
         self.train_data_stem = train_data_stem
+        
+        self.batch_size = batch_size
+        self.num_iterations = num_iterations
+        
+        self.export_figures_counter = 0
         
         # check if input_col, output_col, and train_data_stem exist in formatted_data
         if set(self.input_col_name + self.output_col_name) > set(self.formatted_data_raw.columns):
@@ -288,11 +337,10 @@ class TrainLiqData:
         # make other instance variables
         self.input_dim = len(self.input_col_name)
         self.output_dim = len(self.output_col_name)
-        self.hidden_dim = 128
-        self.num_layers = 2
-        self.learning_rate = 0.005
-        self.num_epochs = 100
-        self.seq_length = 1
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.learning_rate = learning_rate
+        self.seq_length = seq_length
 
         # check device type
         if device_type == "mps":
@@ -311,8 +359,8 @@ class TrainLiqData:
             if self.seq_length == 1:
                 self.X_train = torch.tensor(self.formatted_data_norm[self.input_col_name].values.reshape(-1, 1, 5), device=self.device, dtype=torch.float32)
                 y_train = torch.tensor(self.formatted_data_norm[self.output_col_name].values, device=self.device, dtype=torch.float32)
+            
             else:
-                
                 temp_X_train = np.zeros((0, self.seq_length, self.input_dim))
                 temp_y_train = np.zeros((0, self.output_dim))
                 
@@ -327,38 +375,69 @@ class TrainLiqData:
             
             print("X_train shape", self.X_train.shape, "y_train shape", y_train.shape)
         
+        self.num_epochs = self.num_iterations // (len(self.X_train) // self.batch_size)
+        train_loader = create_dataloader(self.X_train, y_train, self.batch_size)
+        
         self.model.train()
         
         # train model
         for epoch in range(self.num_epochs):
-            
-            optimizer.zero_grad()
-            output = self.model(self.X_train)
-            loss = criterion(output, y_train)
-            loss.backward()
-            optimizer.step()
+            for i, (batch_X, batch_y) in enumerate(train_loader):
+                optimizer.zero_grad()
+                output = self.model(batch_X)
+                loss = criterion(output, batch_y)
+                loss.backward()
+                optimizer.step()
                         
-            print(f'Epoch [{epoch+1}/{self.num_epochs}], Loss: {loss.item():.7f}')
+            print(f'Epoch [{epoch+1}/{self.num_epochs}], Loss: {loss.item():.9f}')
         
         # save model
         self.completed_time = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         model_path = self.result_path / (self.completed_time + "_" + self.model_type + "_model.pth")
         torch.save(self.model, model_path)
     
-    def predict(self, q_step = 1, q_amp = 26, end_cycle = 50, unit="kPa", is_exporting = True, ylim=[-25, 25], target_data_stem="T50-0-2"):
+    def predict(self, inc_control = "q", inc_step = 1, reverse_control = "q", reverse_thres = 26, 
+                end_cycle = 50, stress_unit="kPa", strain_unit="percent", is_exporting = True, ylim=[-25, 25], target_data_stem="T50-0-2"):
         
         self.model.eval()
         
-        if unit == "kPa":
-            q_step = q_step * 1000
-            q_amp = q_amp * 1000
+        
+        # check control parameters
+        if inc_control not in ["q", "ea"] or reverse_control not in ["q", "ea"]:
+            raise ValueError("inc_control and reverse_control must be 'q' or 'ea'")
+        else:
+            if inc_control == "q" and "q_inc" not in self.input_col_name:
+                raise ValueError("q_inc must be in input_col_name")
+            if inc_control == "ea" and "ea_inc" not in self.input_col_name:
+                raise ValueError("ea_inc must be in input_col_name")
+        
+        # check strees_unit and strain_unit
+        if stress_unit not in ["kPa", "Pa"]:
+            raise ValueError("stress_unit must be 'kPa' or 'Pa'")
+        if strain_unit not in ["percent", "nodim"]:
+            raise ValueError("strain_unit must be 'percent' or 'nodim'")
+        
+        if stress_unit == "kPa":
+            if inc_control == "q":
+                inc_step = inc_step * 1000
+            if reverse_control == "q":
+                reverse_thres = reverse_thres * 1000
             ylim = [i * 1000 for i in ylim]
         
-        self.q_step = q_step
-        self.q_amp = q_amp
+        if strain_unit == "percent":
+            if inc_control == "ea":
+                inc_step = inc_step / 100
+            if reverse_control == "ea":
+                reverse_thres = reverse_thres / 100
+        
+        self.inc_control = inc_control
+        self.inc_step = inc_step
+        self.reverse_control = reverse_control
+        self.reverse_thres = reverse_thres
         self.end_cycle = end_cycle
         self.ylim = ylim
         self.is_exporting = is_exporting
+        self.target_data_stem = target_data_stem
         
         temp_cycle = 0
         temp_load_forward = True
@@ -377,6 +456,7 @@ class TrainLiqData:
             
             temp_input_norm = temp_input_raw / self.formatted_data_scale[self.input_col_name].values[:, :5]
             temp_data = torch.tensor(temp_input_norm, device=self.device, dtype=torch.float32)
+            
             with torch.no_grad():
                 output_norm = self.model(temp_data)
             
@@ -387,6 +467,19 @@ class TrainLiqData:
             
             if self.seq_length > 1:
                 temp_input_raw[0, :-1, :] = temp_input_raw[0, 1:, :]
+                
+            temp_input_raw, temp_result, temp_load_forward, temp_cycle = self._update_stress_strain(temp_input_raw, temp_result, temp_load_forward, output_raw, temp_cycle)
+                
+        self.result = temp_result
+        
+        if self.is_exporting:
+            
+            self._export_figures()
+    
+    
+    def _update_stress_strain(self, temp_input_raw, temp_result, temp_load_forward, output_raw, temp_cycle):
+        
+        if self.inc_control == "q" and "q_inc" in self.input_col_name:
             
             temp_q_inc_index = self.input_col_name.index("q_inc")
             temp_q_index = self.input_col_name.index("q_pa")
@@ -395,82 +488,127 @@ class TrainLiqData:
             temp_CSW_index = self.input_col_name.index("CSW")
             
             if temp_load_forward:
-                temp_input_raw[0, -1, temp_q_inc_index] = self.q_step
+                temp_input_raw[0, -1, temp_q_inc_index] = self.inc_step
             else:
-                temp_input_raw[0, -1, temp_q_inc_index] = -self.q_step
+                temp_input_raw[0, -1, temp_q_inc_index] = -self.inc_step
             
             temp_input_raw[0, -1, temp_q_index] += temp_input_raw[0, -1, temp_q_inc_index]
             temp_input_raw[0, -1, temp_p_index] += output_raw[0]
             temp_input_raw[0, -1, temp_ea_index] += output_raw[1]
             temp_input_raw[0, -1, temp_CSW_index] += (temp_input_raw[0, -1, temp_q_index] - temp_input_raw[0, -1, temp_q_inc_index] / 2) * output_raw[1] * 3 / 4
-            
-            temp_result = np.vstack((temp_result, np.array([temp_input_raw[0, -1, temp_p_index], temp_input_raw[0, -1, temp_q_index], temp_input_raw[0, -1, temp_ea_index], temp_input_raw[0, -1, temp_CSW_index], temp_cycle])))
-            
-            if temp_load_forward and temp_input_raw[0, -1, temp_q_index] >= self.q_amp:
+
+            if temp_load_forward and temp_input_raw[0, -1, temp_q_index] >= self.reverse_thres:
                 temp_load_forward = False
                 temp_cycle += 0.5
-                # print(temp_p[-1], temp_q[-1], temp_ea[-1], temp_CSW[-1], temp_cycle)
-                
-            elif not temp_load_forward and temp_input_raw[0, -1, temp_q_index] <= -self.q_amp:
+            elif not temp_load_forward and temp_input_raw[0, -1, temp_q_index] <= -self.reverse_thres:
                 temp_load_forward = True
                 temp_cycle += 0.5
-                # print(temp_p[-1], temp_q[-1], temp_ea[-1], temp_CSW[-1], temp_cycle)
-                
             
-        if self.is_exporting:
+        elif self.inc_control == "ea" and "ea_inc" in self.input_col_name:
             
-            # check if target_data_stem exist in formatted_data
-            if target_data_stem not in pd.unique(self.formatted_data_raw["file_name"]):
-                raise ValueError("target_data_stem must be in formatted_data")
+            temp_ea_inc_index = self.input_col_name.index("ea_inc")
+            temp_q_index = self.input_col_name.index("q_pa")
+            temp_p_index = self.input_col_name.index("p_pa")
+            temp_ea_index = self.input_col_name.index("ea_nodim")
+            temp_CSW_index = self.input_col_name.index("CSW")
+            
+            if temp_load_forward:
+                temp_input_raw[0, -1, temp_ea_inc_index] = self.inc_step
             else:
-                temp_target_data = self.formatted_data_raw[self.formatted_data_raw["file_name"] == target_data_stem]
+                temp_input_raw[0, -1, temp_ea_inc_index] = -self.inc_step
             
-            fig, axes = setup_figure(num_row=1, num_col=5, width=24)
-            
-            temp_x_result = np.linspace(0, 1, len(temp_result))
-            temp_x_original = np.linspace(0, 1, len(temp_target_data) - self.seq_length)
-            
-            # なぜか分からないが、self.formatted_data_rawの最初のself.seq_length行分がtemp_resultのself.seq_length行の内容に入れ替わっている。
-            # print(temp_result)
-            # print(self.formatted_data_raw)
-            
-            axes[0, 0].plot(temp_result[:, 0], temp_result[:, 1], color="k", linewidth=1, alpha=0.5)
-            axes[0, 0].plot(temp_target_data["p_pa"].iloc[self.seq_length:], temp_target_data["q_pa"].iloc[self.seq_length:], color="r", linewidth=1, alpha=0.5)
-            axes[0, 0].set_xlabel("p'")
-            axes[0, 0].set_ylabel("q")
-            axes[0, 1].plot(temp_result[:, 2], temp_result[:, 1], color="k", linewidth=1)
-            axes[0, 1].plot(temp_target_data["ea_nodim"].iloc[self.seq_length:], temp_target_data["q_pa"].iloc[self.seq_length:], color="r", linewidth=1)
-            axes[0, 1].set_xlabel("e(a)")
-            axes[0, 1].set_ylabel("q")
-            axes[0, 2].plot(temp_x_result, temp_result[:, 0], color="k", linewidth=1)
-            axes[0, 2].plot(temp_x_original, temp_target_data["p_pa"].iloc[self.seq_length:], color="r", linewidth=1)
-            axes[0, 2].set_ylabel("p")
-            axes[0, 3].plot(temp_x_result, temp_result[:, 2], color="k", linewidth=1)
-            axes[0, 3].plot(temp_x_original, temp_target_data["ea_nodim"].iloc[self.seq_length:], color="r", linewidth=1)
-            axes[0, 3].set_ylabel("e(a)")
-            axes[0, 4].plot(temp_x_result, temp_result[:, 3], color="k", linewidth=1)
-            axes[0, 4].plot(temp_x_original, temp_target_data["CSW"].iloc[self.seq_length:], color="r", linewidth=1)
-            axes[0, 4].set_ylabel("CSW")
-            
-            for i in range(5):
-                axes[0, i].spines["top"].set_linewidth(0.5)
-                axes[0, i].spines["bottom"].set_linewidth(0.5)
-                axes[0, i].spines["right"].set_linewidth(0.5)
-                axes[0, i].spines["left"].set_linewidth(0.5)
-                axes[0, i].xaxis.set_tick_params(width=0.5)
-                axes[0, i].yaxis.set_tick_params(width=0.5)
-                # rotate y labels
-                axes[0, i].tick_params(axis="y", rotation=90)
-                axes[0, i].grid(True, which="both", linestyle="--", linewidth=0.25)
-            0, 
-            fig_name = self.result_path / (self.completed_time + "_predicted_stress_strain_" + self.model_type + ".jpg")
-            
-            fig.savefig(fig_name, format="jpg", dpi=600, pad_inches=0.05, bbox_inches="tight")
-            print("Exported Trained Data!")
-            
-            plt.clf()
-            plt.close()
-            gc.collect()  
+            temp_input_raw[0, -1, temp_ea_index] += temp_input_raw[0, -1, temp_ea_inc_index]
+            temp_input_raw[0, -1, temp_p_index] += output_raw[0]
+            temp_input_raw[0, -1, temp_q_index] += output_raw[1]
+            temp_input_raw[0, -1, temp_CSW_index] += temp_input_raw[0, -1, temp_q_index] - output_raw[1] / 2 * temp_input_raw[0, -1, temp_ea_inc_index] * 3 / 4    
+        else:
+            raise ValueError("inc_control does not match with input_col_name") 
         
-
+        temp_result = np.vstack((temp_result, np.array([temp_input_raw[0, -1, temp_p_index], temp_input_raw[0, -1, temp_q_index], temp_input_raw[0, -1, temp_ea_index], temp_input_raw[0, -1, temp_CSW_index], temp_cycle])))
         
+        if self.reverse_control == "q":
+            
+            if temp_load_forward and temp_input_raw[0, -1, temp_q_index] >= self.reverse_thres:
+                temp_load_forward = False
+                temp_cycle += 0.5
+                print(temp_cycle, temp_input_raw[0, -1, temp_p_index], temp_input_raw[0, -1, temp_q_index], temp_input_raw[0, -1, temp_ea_index])
+                
+            elif not temp_load_forward and temp_input_raw[0, -1, temp_q_index] <= -self.reverse_thres:
+                temp_load_forward = True
+                temp_cycle += 0.5
+                print(temp_cycle, temp_input_raw[0, -1, temp_p_index], temp_input_raw[0, -1, temp_q_index], temp_input_raw[0, -1, temp_ea_index])
+                
+        elif self.reverse_control == "ea":
+                
+            if temp_load_forward and temp_input_raw[0, -1, temp_ea_index] >= self.reverse_thres:
+                temp_load_forward = False
+                temp_cycle += 0.5
+                print(temp_cycle, temp_input_raw[0, -1, temp_p_index], temp_input_raw[0, -1, temp_q_index], temp_input_raw[0, -1, temp_ea_index])
+            elif not temp_load_forward and temp_input_raw[0, -1, temp_ea_index] <= -self.reverse_thres:
+                temp_load_forward = True
+                temp_cycle += 0.5
+                print(temp_cycle, temp_input_raw[0, -1, temp_p_index], temp_input_raw[0, -1, temp_q_index], temp_input_raw[0, -1, temp_ea_index])
+                
+                
+        else:
+            raise ValueError("'reverse_control' is not 'q' or 'ea'")       
+        
+        return temp_input_raw, temp_result, temp_load_forward, temp_cycle
+            
+    
+    def _export_figures(self):
+                
+        # check if target_data_stem exist in formatted_data
+        if self.target_data_stem not in pd.unique(self.formatted_data_raw["file_name"]):
+            raise ValueError("target_data_stem must be in formatted_data")
+        else:
+            temp_target_data = self.formatted_data_raw[self.formatted_data_raw["file_name"] == self.target_data_stem]
+        
+        fig, axes = setup_figure(num_row=1, num_col=5, width=24)
+        
+        temp_x_result = np.linspace(0, 1, len(self.result))
+        temp_x_original = np.linspace(0, 1, len(temp_target_data) - self.seq_length)
+        
+        # なぜか分からないが、self.formatted_data_rawの最初のself.seq_length行分がself.resultのself.seq_length行の内容に入れ替わっている。
+        # print(self.result)
+        # print(self.formatted_data_raw)
+        
+        axes[0, 0].plot(self.result[:, 0], self.result[:, 1], color="k", linewidth=1, alpha=0.5)
+        axes[0, 0].plot(temp_target_data["p_pa"].iloc[self.seq_length:], temp_target_data["q_pa"].iloc[self.seq_length:], color="r", linewidth=1, alpha=0.5)
+        axes[0, 0].set_xlabel("p'")
+        axes[0, 0].set_ylabel("q")
+        axes[0, 1].plot(self.result[:, 2], self.result[:, 1], color="k", linewidth=1)
+        axes[0, 1].plot(temp_target_data["ea_nodim"].iloc[self.seq_length:], temp_target_data["q_pa"].iloc[self.seq_length:], color="r", linewidth=1)
+        axes[0, 1].set_xlabel("e(a)")
+        axes[0, 1].set_ylabel("q")
+        axes[0, 2].plot(temp_x_result, self.result[:, 0], color="k", linewidth=1)
+        axes[0, 2].plot(temp_x_original, temp_target_data["p_pa"].iloc[self.seq_length:], color="r", linewidth=1)
+        axes[0, 2].set_ylabel("p")
+        axes[0, 3].plot(temp_x_result, self.result[:, 2], color="k", linewidth=1)
+        axes[0, 3].plot(temp_x_original, temp_target_data["ea_nodim"].iloc[self.seq_length:], color="r", linewidth=1)
+        axes[0, 3].set_ylabel("e(a)")
+        axes[0, 4].plot(temp_x_result, self.result[:, 3], color="k", linewidth=1)
+        axes[0, 4].plot(temp_x_original, temp_target_data["CSW"].iloc[self.seq_length:], color="r", linewidth=1)
+        axes[0, 4].set_ylabel("CSW")
+        
+        for i in range(5):
+            axes[0, i].spines["top"].set_linewidth(0.5)
+            axes[0, i].spines["bottom"].set_linewidth(0.5)
+            axes[0, i].spines["right"].set_linewidth(0.5)
+            axes[0, i].spines["left"].set_linewidth(0.5)
+            axes[0, i].xaxis.set_tick_params(width=0.5)
+            axes[0, i].yaxis.set_tick_params(width=0.5)
+            # rotate y labels
+            axes[0, i].tick_params(axis="y", rotation=90)
+            axes[0, i].grid(True, which="both", linestyle="--", linewidth=0.25)
+        
+        fig_name = self.result_path / (self.completed_time + "_predicted_stress_strain_" + self.model_type + "_" + "{:03d}".format(self.export_figures_counter) + ".jpg")
+        
+        fig.savefig(fig_name, format="jpg", dpi=600, pad_inches=0.05, bbox_inches="tight")
+        self.export_figures_counter += 1
+        print("Exported Trained Data!")
+        
+        plt.clf()
+        plt.close()
+        gc.collect()
+    
