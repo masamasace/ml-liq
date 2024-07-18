@@ -379,9 +379,10 @@ class TrainLiqData:
         
         # generate hash
         model_feature_str = self.model_type + "_" + str(self.hidden_dim) + "_" + str(self.num_layers) + "_" + str(self.seq_length) + \
-            "_" + "-".join(self.input_col_name) + "_" + "-".join(self.output_col_name)
+            "_" + "-".join(self.train_data_stem) + "-".join(self.input_col_name) + "_" + "-".join(self.output_col_name)
         model_hash_object = hashlib.md5(model_feature_str.encode())
         self.model_hash = model_hash_object.hexdigest()
+        print(self.model_hash)
         
         # check if trained data exists
         self.dataset_path = self.temp_path / (self.model_hash + "_dataset.npz")
@@ -440,7 +441,6 @@ class TrainLiqData:
         
         # split training data
         
-        print(temp_X[0, :5, :])
         train_size = int(len(temp_X) * self.train_split_ratio)
         val_size = len(temp_X) - train_size
         
