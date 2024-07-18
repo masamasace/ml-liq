@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 import datetime
 import random
 from torch.utils.data import DataLoader, TensorDataset, random_split
+import hashlib
+import json
 
 plt.rcParams["font.family"] = "Arial"
 plt.rcParams["mathtext.fontset"] = "dejavuserif" 
@@ -70,7 +72,7 @@ class LiqDataFormatter:
         print(f"Number of data: {len(self.data_path)}")
         
         # create result folder
-        self.result_path = Path(__file__).resolve().parent / "result"
+        self.result_path = Path(__file__).resolve().parent / "result" / datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.result_path.mkdir(parents=True, exist_ok=True)
         
         # create temp folder
@@ -322,20 +324,22 @@ class StressStrainCNN(nn.Module):
 
 # define train class
 class TrainLiqData:
-    def __init__(self, formatted_data, model_type = "RNN", device_type = "mps",
+    def __init__(self, formatted_data, model_type = "RNN", device_type = "cuda",
                  input_col_name = ["p_pa", "q_pa", "q_inc", "ea_nodim", "CSW"],
                  output_col_name = ["p_inc", "ea_inc"],
                  train_data_stem = ["T50-0-1", "T50-0-3", "T50-0-4"],
                  train_split_ratio = 0.8,
                  batch_div=8, num_epoch=100,
                  hidden_dim=16, num_layers=2, learning_rate=0.001,
-                 seq_length=1, seed=0) -> None:
+                 seq_length=1, seed=0, flag_import_existing_dataset=True,
+                 flag_export_model=True, flag_export_instance_vars=True) -> None:
         
         # make instance variables
         self.formatted_data_raw = formatted_data.liq_data
         self.formatted_data_norm = formatted_data.liq_data_norm
         self.formatted_data_scale = formatted_data.liq_data_scale
         self.result_path = formatted_data.result_path
+        self.temp_path = formatted_data.temp_path
         torch_fix_seed(seed)
         
         self.model_type = model_type
@@ -363,6 +367,9 @@ class TrainLiqData:
         self.num_layers = num_layers
         self.learning_rate = learning_rate
         self.seq_length = seq_length
+        self.flag_import_existing_dataset = flag_import_existing_dataset
+        self.flag_export_model = flag_export_model
+        self.flag_export_instance_var = flag_export_instance_vars
 
         # check device type
         if device_type == "mps":
@@ -370,51 +377,81 @@ class TrainLiqData:
         elif device_type == "cuda":
             self.device = torch.device(device_type if torch.cuda.is_available() else "cpu")
         
+        # generate hash
+        model_feature_str = self.model_type + "_" + str(self.hidden_dim) + "_" + str(self.num_layers) + "_" + str(self.seq_length) + \
+            "_" + "-".join(self.input_col_name) + "_" + "-".join(self.output_col_name)
+        model_hash_object = hashlib.md5(model_feature_str.encode())
+        self.model_hash = model_hash_object.hexdigest()
+        
+        # check if trained data exists
+        self.dataset_path = self.temp_path / (self.model_hash + "_dataset.npz")
+        
         # check model type
-        if model_type == "RNN":
+        if self.model_type == "RNN":
             
             self.model = StressStrainRNN(self.input_dim, self.hidden_dim, self.output_dim).to(self.device)
             
-            # make training data
-            temp_X = np.zeros((0, self.seq_length, self.input_dim))
-            temp_y = np.zeros((0, self.output_dim))
+            if self.dataset_path.exists() and self.flag_import_existing_dataset:
+                temp_dataset = np.load(self.dataset_path)
+                temp_X = temp_dataset["temp_X"]
+                temp_y = temp_dataset["temp_y"]
             
-            for i in range(len(self.train_data_stem)):
-                temp_each_data = self.formatted_data_norm[self.formatted_data_norm["file_name"] == self.train_data_stem[i]]
+            else:
+                # make training data
+                temp_X = np.zeros((0, self.seq_length, self.input_dim))
+                temp_y = np.zeros((0, self.output_dim))
                 
-                temp_X = np.vstack((temp_X, np.array([temp_each_data[self.input_col_name].values[j:j+self.seq_length, :] for j in range(len(temp_each_data.iloc[:, :5].values) - self.seq_length)])))
-                temp_y = np.vstack((temp_y, temp_each_data[self.output_col_name].values[self.seq_length:]))
-                                            
-        
-        elif model_type == "CNN":
+                for i in range(len(self.train_data_stem)):
+                    temp_each_data = self.formatted_data_norm[self.formatted_data_norm["file_name"] == self.train_data_stem[i]]
+                    
+                    temp_X = np.vstack((temp_X, np.array([temp_each_data[self.input_col_name].values[j:j+self.seq_length, :] for j in range(len(temp_each_data.iloc[:, :5].values) - self.seq_length)])))
+                    temp_y = np.vstack((temp_y, temp_each_data[self.output_col_name].values[self.seq_length:]))
+                                                
+            
+        elif self.model_type == "CNN":
             
             self.model = StressStrainCNN(self.seq_length).to(self.device)
             
-            # make training data
-            temp_X = np.zeros((0, self.input_dim, self.seq_length))
-            temp_y = np.zeros((0, self.output_dim))
+            if self.dataset_path.exists() and self.flag_import_existing_dataset:
+                temp_dataset = np.load(self.dataset_path)
+                temp_X = temp_dataset["temp_X"]
+                temp_y = temp_dataset["temp_y"]
             
-            for i in range(len(self.train_data_stem)):
-                temp_each_data = self.formatted_data_norm[self.formatted_data_norm["file_name"] == self.train_data_stem[i]]
+            else:
+                # make training data
+                temp_X = np.zeros((0, self.input_dim, self.seq_length))
+                temp_y = np.zeros((0, self.output_dim))
                 
-                if self.seq_length == 1:
-                    temp_X = np.vstack((temp_X, temp_each_data[self.input_col_name].values.reshape(-1, self.input_dim, 1)))
-                    temp_y = np.vstack((temp_y, temp_each_data[self.output_col_name].values))
-                
-                else:
-                    temp_X = np.vstack((temp_X, np.array([temp_each_data[self.input_col_name].values[j:j+self.seq_length, :] for j in range(len(temp_each_data.iloc[:, :5].values) - self.seq_length)])))
-                    temp_y = np.vstack((temp_y, temp_each_data[self.output_col_name].values[self.seq_length:]))
+                for i in range(len(self.train_data_stem)):
+                    temp_each_data = self.formatted_data_norm[self.formatted_data_norm["file_name"] == self.train_data_stem[i]]
+                    
+                    if self.seq_length == 1:
+                        temp_X = np.vstack((temp_X, temp_each_data[self.input_col_name].values.reshape(-1, self.input_dim, 1)))
+                        temp_y = np.vstack((temp_y, temp_each_data[self.output_col_name].values))
+                    
+                    else:
+                        temp_X = np.vstack((temp_X, np.array([temp_each_data[self.input_col_name].values[j:j+self.seq_length, :] for j in range(len(temp_each_data.iloc[:, :5].values) - self.seq_length)])))
+                        temp_y = np.vstack((temp_y, temp_each_data[self.output_col_name].values[self.seq_length:]))
+        
+        # save training data if not exists
+        if not self.dataset_path.exists():
             
+            np.savez(self.dataset_path, temp_X=temp_X, temp_y=temp_y)
+        
+        # split training data
+        
+        print(temp_X[0, :5, :])
         train_size = int(len(temp_X) * self.train_split_ratio)
         val_size = len(temp_X) - train_size
         
         temp_train_X, temp_val_X = random_split(temp_X, [train_size, val_size])
         temp_train_y, temp_val_y = random_split(temp_y, [train_size, val_size])
         
-        X_train = torch.tensor(temp_train_X, device=self.device, dtype=torch.float32)
-        X_val = torch.tensor(temp_val_X, device=self.device, dtype=torch.float32)
-        y_train = torch.tensor(temp_train_y, device=self.device, dtype=torch.float32)
-        y_val = torch.tensor(temp_val_y, device=self.device, dtype=torch.float32)
+        # convert to tensor
+        X_train = torch.tensor(np.array(temp_train_X), device=self.device, dtype=torch.float32)
+        X_val = torch.tensor(np.array(temp_val_X), device=self.device, dtype=torch.float32)
+        y_train = torch.tensor(np.array(temp_train_y), device=self.device, dtype=torch.float32)
+        y_val = torch.tensor(np.array(temp_val_y), device=self.device, dtype=torch.float32)
             
         print("X_train shape", X_train.shape, "y_train shape", y_train.shape)
         print("X_val shape", X_val.shape, "y_val shape", y_val.shape)
@@ -432,7 +469,6 @@ class TrainLiqData:
         train_loader = create_dataloader(X_train, y_train, self.batch_size)
         
         # start training
-        
         epoch_result = np.zeros((0, 3))
         
         for epoch in range(self.num_epoch):
@@ -456,18 +492,28 @@ class TrainLiqData:
             epoch_result = np.vstack((epoch_result, np.array([epoch+1, loss.item(), val_loss.item()])))
                         
         # save model
-        self.completed_time = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        self.completed_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         model_path = self.result_path / (self.completed_time + "_" + self.model_type + "_model.pth")
         torch.save(self.model, model_path)
         
         # save epoch_result
         epoch_result_path = self.result_path / (self.completed_time + "_" + self.model_type + "_epoch_result.csv")
         pd.DataFrame(epoch_result, columns=["epoch", "train_loss", "val_loss"]).to_csv(epoch_result_path, index=False)
+        
+        # save instance variables into json file
+        if self.flag_export_instance_var:
+            
+            self.instance_var_path = self.result_path / (self.completed_time + "_" + self.model_type + "_instance_var.json")
+            filtered_dict = {key: value for key, value in self.__dict__.items() if isinstance(value, (int, float, str, list, dict, bool))}
+            json.dump(filtered_dict, open(self.instance_var_path, "w"), indent=4)
+        
     
     
     # method to predict
     def predict(self, inc_control="q", inc_step=1, reverse_control="q", reverse_thres=26, 
-                end_cycle=100, end_p=-10, end_ea=10, stress_unit="kPa", strain_unit="percent", is_exporting = True, ylim=[-25, 25], target_data_stem="T50-0-2"):
+                end_cycle=100, end_p=-10, end_ea=10, stress_unit="kPa", strain_unit="percent", 
+                flag_export_predict_figure = True, flag_export_predict_csv = True,
+                target_data_stem="T50-0-2"):
         
         self.model.eval()
         
@@ -491,7 +537,6 @@ class TrainLiqData:
                 inc_step = inc_step * 1000
             if reverse_control == "q":
                 reverse_thres = reverse_thres * 1000
-            ylim = [i * 1000 for i in ylim]
             end_p = end_p * 1000
         
         if strain_unit == "percent":
@@ -506,8 +551,8 @@ class TrainLiqData:
         self.reverse_control = reverse_control
         self.reverse_thres = reverse_thres
         self.end_cycle = end_cycle
-        self.ylim = ylim
-        self.is_exporting = is_exporting
+        self.flag_export_predict_figure = flag_export_predict_figure
+        self.flag_export_predict_csv = flag_export_predict_csv
         self.target_data_stem = target_data_stem
         self.end_p = end_p
         self.end_ea = end_ea
@@ -551,9 +596,14 @@ class TrainLiqData:
                 
         self.result = temp_result
         
-        if self.is_exporting:
+        if self.flag_export_predict_figure:
             
             self._export_figures()
+        
+        if self.flag_export_predict_figure and self.flag_export_predict_csv:
+            
+            self.result_path = self.result_path / (self.completed_time + "_predicted_stress_strain_" + self.model_type + "_" + "{:03d}".format(self.export_figures_counter) + ".csv")
+            
     
     
     def _update_stress_strain(self, temp_input_raw, temp_result, temp_load_forward, output_raw, temp_cycle):
